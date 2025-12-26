@@ -15,3 +15,4 @@ if errorlevel 1 (
 ) else (
   echo PUSH OK
 )
+pause
