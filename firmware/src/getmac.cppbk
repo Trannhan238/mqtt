@@ -1,0 +1,19 @@
+#include <Arduino.h>
+#include <WiFi.h>
+
+void setup() {
+    Serial.begin(115200);
+    delay(1000);
+    
+    // Khởi tạo WiFi để chip bật module sóng lên mới lấy được MAC
+    WiFi.mode(WIFI_STA); 
+    
+    Serial.println("\n----------------------------------");
+    Serial.print("🆔 ĐỊA CHỈ MAC THẬT CỦA SẾP ĐÂY: ");
+    Serial.println(WiFi.macAddress());
+    Serial.println("----------------------------------");
+}
+
+void loop() {
+    // Không làm gì cả
+}

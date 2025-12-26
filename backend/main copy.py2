@@ -1,0 +1,118 @@
+import asyncio
+import os
+from datetime import datetime, timedelta
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api import auth, schools, devices, schedules, patterns
+from app.core.config import settings
+from app.database.session import engine, SessionLocal
+from app.models.domain import Base, Device # Import trực tiếp model Device để check health
+from app.core.mqtt_client import MQTTHandler
+from app.services.schedule_service import ScheduleService
+
+# --- 1. KHỞI TẠO HỆ THỐNG ---
+if not os.path.exists("data"):
+    os.makedirs("data")
+    print("[System] Đã tạo thư mục data!")
+
+# Tạo bảng database
+Base.metadata.create_all(bind=engine)
+
+# --- 2. WORKER KIỂM TRA SỨC KHỎE (HEALTH CHECK) ---
+async def device_health_monitor():
+    """
+    Worker chạy ngầm: Cứ 60 giây quét DB một lần.
+    Nếu con chuông nào 'last_seen' quá 2 phút thì cho nó Offline.
+    """
+    while True:
+        await asyncio.sleep(60) # Nghỉ 1 phút
+        db = SessionLocal()
+        try:
+            # Tính mốc thời gian bị coi là "mất tích" (2 phút trước)
+            timeout_limit = datetime.now() - timedelta(minutes=2)
+            
+            # Tìm các ông đang 'online' nhưng thực tế đã mất hút
+            zombie_devices = db.query(Device).filter(
+                Device.status == "online",
+                Device.last_seen < timeout_limit
+            ).all()
+
+            for dev in zombie_devices:
+                dev.status = "offline"
+                print(f"💀 [Alert] {dev.mac_address} ({dev.name}) đã mất kết nối!")
+                # Sếp có thể thêm hàm gửi tin nhắn Telegram vào đây sau này
+            
+            db.commit()
+        except Exception as e:
+            print(f"❌ [Health Monitor Error] {e}")
+        finally:
+            db.close()
+
+# --- 3. QUẢN LÝ VÒNG ĐỜI (LIFESPAN) ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 3.1. Khởi động MQTT Worker
+    handler = app.state.mqtt_handler
+    mqtt_task = asyncio.create_task(handler.connect())
+    print(f"📡 [System] MQTT kết nối tới {settings.MQTT_BROKER}...")
+    
+    # 3.2. Khởi động Health Check Worker (Chạy song song)
+    health_task = asyncio.create_task(device_health_monitor())
+    print("🛡️ [System] Quản gia theo dõi thiết bị đã bắt đầu làm việc...")
+    
+    yield
+    
+    # 3.3. Dọn dẹp khi tắt Server
+    health_task.cancel()
+    if handler.client.is_connected:
+        await handler.client.disconnect()
+    mqtt_task.cancel()
+    print("[System] Đã tắt toàn bộ tác vụ chạy ngầm. Nghỉ ngơi thôi sếp!")
+
+# --- 4. KHỞI TẠO FASTAPI ---
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    lifespan=lifespan
+)
+
+# --- 5. SETUP MQTT STATE ---
+@asynccontextmanager
+async def get_schedule_service():
+    db = SessionLocal()
+    try:
+        yield ScheduleService(db)
+    finally:
+        db.close()
+
+app.state.mqtt_handler = MQTTHandler(get_schedule_service)
+
+# --- 6. MIDDLEWARE & ROUTERS ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(auth.router)
+app.include_router(schools.router)
+app.include_router(devices.router)
+app.include_router(schedules.router)
+app.include_router(patterns.router)
+
+# --- 7. HOME ---
+@app.get("/", tags=["Health"])
+async def health_check():
+    return {
+        "status": "online",
+        "project": settings.PROJECT_NAME,
+        "message": "Hệ thống Chuông thông minh đang chạy cực mượt!"
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

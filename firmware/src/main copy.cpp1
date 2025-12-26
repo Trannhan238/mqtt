@@ -1,0 +1,219 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include <LittleFS.h>
+
+// --- 1. CẤU HÌNH HỆ THỐNG ---
+const char* ssid = "TV";
+const char* password = "0383678565";
+const char* mqtt_server = "broker.emqx.io"; 
+const char* mac_addr = "E05A1BACAB50"; 
+
+#define LED_PIN 25 
+#define SCHEDULE_FILE "/schedules.json"
+
+// --- 2. BIẾN TOÀN CỤC & ĐỐI TƯỢNG ---
+WiFiClient espClient;
+PubSubClient client(espClient);
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 7 * 3600); 
+
+struct BellSchedule {
+    String time;
+    int pulses;
+    int on_ms;
+    int off_ms;
+};
+BellSchedule schedules[30];
+int scheduleCount = 0;
+
+// Biến quản lý trạng thái reo chuông (Non-blocking)
+bool isRinging = false;
+int currentPulse = 0, totalPulses = 0, onDuration = 0, offDuration = 0;
+unsigned long lastActionTime = 0;
+bool ledState = false;
+String ringType = "AUTO"; 
+
+// Biến quản lý Heartbeat (Theo dõi sức khỏe thiết bị)
+unsigned long lastHeartbeat = 0;
+const unsigned long heartbeatInterval = 30000; // 30 giây gửi 1 lần
+
+// --- 3. HÀM GỬI LOG & HEARTBEAT ---
+void sendLog(String status, String msg, String event = "") {
+    if (!client.connected()) return;
+    
+    JsonDocument doc;
+    doc["event_type"] = (event == "") ? ringType : event;
+    doc["status"] = status;
+    doc["message"] = msg;
+    doc["rssi"] = WiFi.RSSI(); // Gửi thêm cường độ sóng WiFi
+    doc["time"] = timeClient.getFormattedTime();
+
+    char buffer[256];
+    serializeJson(doc, buffer);
+    
+    String logTopic = "school_bell/" + String(mac_addr) + "/logs";
+    client.publish(logTopic.c_str(), buffer);
+    Serial.println("📤 [MQTT] Log sent: " + msg);
+}
+
+void checkHeartbeat() {
+    if (millis() - lastHeartbeat >= heartbeatInterval) {
+        sendLog("ONLINE", "Em vẫn sống khỏe!", "HEARTBEAT");
+        lastHeartbeat = millis();
+    }
+}
+
+// --- 4. QUẢN LÝ LƯU TRỮ (LittleFS) ---
+void saveSchedulesToFS() {
+    JsonDocument doc;
+    JsonArray array = doc.to<JsonArray>();
+    for (int i = 0; i < scheduleCount; i++) {
+        JsonObject obj = array.add<JsonObject>();
+        obj["t"] = schedules[i].time; 
+        obj["n"] = schedules[i].pulses;
+        obj["on"] = schedules[i].on_ms; 
+        obj["off"] = schedules[i].off_ms;
+    }
+    File file = LittleFS.open(SCHEDULE_FILE, FILE_WRITE);
+    if (file) { 
+        serializeJson(doc, file); 
+        file.close(); 
+        Serial.println("💾 Đã lưu lịch vào Flash.");
+    }
+}
+
+void loadSchedulesFromFS() {
+    if (!LittleFS.exists(SCHEDULE_FILE)) return;
+    File file = LittleFS.open(SCHEDULE_FILE, FILE_READ);
+    JsonDocument doc;
+    if (deserializeJson(doc, file) == DeserializationError::Ok) {
+        JsonArray array = doc.as<JsonArray>();
+        scheduleCount = 0;
+        for (JsonObject item : array) {
+            schedules[scheduleCount] = {item["t"].as<String>(), item["n"], item["on"], item["off"]};
+            scheduleCount++;
+        }
+        Serial.printf("📂 Nạp %d lịch từ bộ nhớ trong.\n", scheduleCount);
+    }
+    file.close();
+}
+
+// --- 5. LOGIC REO CHUÔNG ---
+void startBell(int pulses, int on_ms, int off_ms, String type) {
+    if (isRinging) return;
+    totalPulses = pulses; onDuration = on_ms; offDuration = off_ms;
+    ringType = type; 
+    currentPulse = 0; isRinging = true; lastActionTime = millis();
+    ledState = true; digitalWrite(LED_PIN, HIGH);
+    Serial.printf("🔔 BẮT ĐẦU REO (%s): %d hồi...\n", type.c_str(), pulses);
+}
+
+void updateBell() {
+    if (!isRinging) return;
+    unsigned long now = millis();
+    if (ledState) {
+        if (now - lastActionTime >= onDuration) {
+            digitalWrite(LED_PIN, LOW); ledState = false; lastActionTime = now;
+            currentPulse++;
+            if (currentPulse >= totalPulses) { 
+                isRinging = false; 
+                Serial.println("✅ Reo xong!");
+                sendLog("SUCCESS", "Đã hoàn thành " + String(totalPulses) + " hồi chuông.");
+            }
+        }
+    } else {
+        if (now - lastActionTime >= offDuration) {
+            digitalWrite(LED_PIN, HIGH); ledState = true; lastActionTime = now;
+        }
+    }
+}
+
+// --- 6. MQTT & ĐỒNG BỘ ---
+void requestSync() {
+    String reqTopic = "school_bell/" + String(mac_addr) + "/request_sync";
+    client.publish(reqTopic.c_str(), "{}");
+    Serial.println("📤 Đang gửi yêu cầu đồng bộ lịch mới...");
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+    String topicStr = String(topic);
+    JsonDocument doc;
+    if (deserializeJson(doc, payload, length) != DeserializationError::Ok) return;
+
+    if (topicStr.endsWith("/sync_now")) {
+        requestSync();
+    } else if (topicStr.endsWith("/sync")) {
+        JsonArray sch = doc["sch"];
+        scheduleCount = 0;
+        for (JsonObject item : sch) {
+            schedules[scheduleCount] = {
+                item["t"].as<String>(), 
+                item["p"]["n"], 
+                item["p"]["on"], 
+                item["p"]["off"]
+            };
+            scheduleCount++;
+        }
+        saveSchedulesToFS();
+        Serial.println("✅ Đã cập nhật và lưu lịch mới.");
+    } else if (topicStr.endsWith("/cmd") && doc["action"] == "ring_now") {
+        startBell(doc["p"]["n"], doc["p"]["on"], doc["p"]["off"], "MANUAL");
+    }
+}
+
+// --- 7. SETUP & LOOP ---
+void setup() {
+    Serial.begin(115200);
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);
+
+    if (LittleFS.begin(true)) loadSchedulesFromFS();
+
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+    Serial.println("\n📶 WiFi Connected!");
+
+    client.setServer(mqtt_server, 1883);
+    client.setBufferSize(2048);
+    client.setCallback(callback);
+    
+    timeClient.begin();
+}
+
+void loop() {
+    // Duy trì kết nối MQTT
+    if (!client.connected()) {
+        if (client.connect(mac_addr)) {
+            String base = "school_bell/" + String(mac_addr);
+            client.subscribe((base + "/sync").c_str());
+            client.subscribe((base + "/sync_now").c_str());
+            client.subscribe((base + "/cmd").c_str());
+            requestSync();
+        }
+    }
+    client.loop();
+    timeClient.update();
+    
+    updateBell();      // Máy trạng thái reo chuông
+    checkHeartbeat();  // Tự động báo cáo sống/chết về server
+
+    // Kiểm tra giờ reo chuông
+    if (timeClient.isTimeSet() && !isRinging) {
+        String currentTime = timeClient.getFormattedTime().substring(0, 5);
+        static String lastRung = "";
+        
+        if (currentTime != lastRung) {
+            for (int i = 0; i < scheduleCount; i++) {
+                if (schedules[i].time == currentTime) {
+                    startBell(schedules[i].pulses, schedules[i].on_ms, schedules[i].off_ms, "AUTO");
+                    lastRung = currentTime;
+                    break;
+                }
+            }
+        }
+    }
+    delay(10); // Loop cực nhanh để không bỏ lỡ lệnh MQTT
+}
