@@ -60,9 +60,12 @@ mqtt_handler = MQTTHandler(get_schedule_service)
 app.state.mqtt_handler = mqtt_handler 
 
 # --- 6. CẤU HÌNH MIDDLEWARE (CORS) ---
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # Cho phép cổng 5173 của React truy cập
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
