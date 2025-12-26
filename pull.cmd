@@ -1,6 +1,7 @@
 @echo off
 
+:: đồng bộ local = GitHub
 git fetch origin
 git reset --hard origin/main
 
-echo SYNC DONE
+echo PULL OK

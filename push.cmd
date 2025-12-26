@@ -1,8 +1,17 @@
-cd /d D:\coding\Bell_production\mqtt
-rmdir /s /q .git
-git init
+@echo off
+
+:: dọn lock nếu có
+if exist .git\index.lock del .git\index.lock
+
+:: add + commit
 git add .
-git commit -m "Reset repository"
-git branch -M main
-git remote add origin https://github.com/Trannhan238/mqtt.git
+git commit -m "update %DATE% %TIME%"
+
+:: ghi đè GitHub
 git push -f origin main
+
+if errorlevel 1 (
+  echo PUSH FAILED
+) else (
+  echo PUSH OK
+)
