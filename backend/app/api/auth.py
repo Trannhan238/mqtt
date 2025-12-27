@@ -23,10 +23,19 @@ async def login_for_access_token(
     if not user or not SecurityHandler.verify_password(form_data.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Sai tài khoản hoặc mật khẩu",
+            detail="Sai tài khoản hoặc mật khẩu sếp ơi!",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # 3. Tạo Token
-    access_token = SecurityHandler.create_access_token(subject=user.username)
-    return {"access_token": access_token, "token_type": "bearer"}
+    # 3. Tạo Token "Thông minh" (Đã nhồi thêm Role và School_ID)
+    # Đây là bước quan trọng nhất để Frontend phân quyền được ngay
+    access_token = SecurityHandler.create_access_token(
+        subject=user.username,
+        role=user.role,           # Gán quyền (admin/school_admin)
+        school_id=user.school_id  # Gán ID trường (nếu có)
+    )
+
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer"
+    }
