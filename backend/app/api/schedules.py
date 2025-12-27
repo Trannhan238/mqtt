@@ -53,3 +53,7 @@ async def create_schedule(
         print(f"⚠️ Lỗi khi cố gắng Auto-Push: {e}")
 
     return new_sch
+@router.get("/") # <--- Phải là .get sếp nhé!
+def list_schedules(db: Session = Depends(get_db)):
+    # Query lấy kèm thông tin pattern để Web hiển thị được tên kiểu chuông
+    return db.query(Schedule).all()

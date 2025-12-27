@@ -36,3 +36,7 @@ def create_pattern(p_in: PatternCreate, db: Session = Depends(get_db), current_u
     
     print(f"✅ [DB] Đã tạo Pattern: {new_p.name} ({new_p.on_duration}ms ON / {new_p.off_duration}ms OFF)")
     return new_p
+@router.get("/") # <--- Đảm bảo chỗ này là .get chứ không phải .post
+def list_patterns(db: Session = Depends(get_db)):
+    patterns = db.query(BellPattern).all()
+    return patterns
